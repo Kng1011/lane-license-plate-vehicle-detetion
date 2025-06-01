@@ -56,7 +56,7 @@ class VehicleDetector:
             self.vehicle_stream = torch.cuda.Stream()
             self.plate_stream = torch.cuda.Stream()
 
-    def is_valid_plate_box(self, box, frame_shape, min_area=100, max_area=50000):
+    def is_valid_plate_box(self, box, frame_shape, min_area=50, max_area=100000):
         """Check if a detected box is likely to be a vehicle license plate"""
         x1, y1, x2, y2 = map(int, box.xyxy[0])
         
@@ -71,9 +71,9 @@ class VehicleDetector:
         
         is_valid = (
             min_area <= area <= max_area and
-            2.0 <= aspect_ratio <= 5.0 and
-            relative_area < 5.0 and
-            height < frame_height * 0.15
+            1.5 <= aspect_ratio <= 6.0 and  # Mais permissivo com a proporção
+            relative_area < 10.0 and  # Mais permissivo com a área relativa
+            height < frame_height * 0.25  # Mais permissivo com a altura
         )
         
         return is_valid
@@ -90,8 +90,8 @@ class VehicleDetector:
                     with torch.cuda.stream(self.vehicle_stream):
                         vehicle_results = self.vehicle_model.predict(
                             frames, 
-                            conf=0.2,
-                            classes=self.VEHICLE_CLASS_ID,  # Use class attribute
+                            conf=0.15,  # Reduzido de 0.2 para 0.15
+                            classes=self.VEHICLE_CLASS_ID,
                             device=self.device,
                             verbose=False
                         )
@@ -108,12 +108,12 @@ class VehicleDetector:
                     with torch.cuda.stream(self.plate_stream):
                         plate_results = self.plate_model.predict(
                             frames, 
-                            conf=0.15,
-                            iou=0.3,
+                            conf=0.1,  # Reduzido de 0.15 para 0.1
+                            iou=0.25,  # Reduzido de 0.3 para 0.25
                             device=self.device,
                             verbose=False,
                             agnostic_nms=True,
-                            imgsz=640,
+                            imgsz=1280,  # Aumentado de 640 para 1280
                             augment=True
                         )
                 except Exception as e:
@@ -175,14 +175,14 @@ class VehicleDetector:
             boxes = result.boxes
             for box in boxes:
                 cls = int(box.cls[0])
-                if cls not in self.VEHICLE_CLASS_ID:  # Use class attribute
+                if cls not in self.VEHICLE_CLASS_ID:
                     continue
                     
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 conf = float(box.conf[0])
                 
                 class_name = self.vehicle_class_names[cls]
-                color = self.VEHICLE_COLORS[cls]  # Use class attribute
+                color = self.VEHICLE_COLORS[cls]
                 
                 cv2.rectangle(frame_copy, (x1, y1), (x2, y2), color, 2)
                 label = f"{class_name} {conf:.2f}"
@@ -199,10 +199,10 @@ class VehicleDetector:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 conf = float(box.conf[0])
                 
-                if conf < 0.15:
+                if conf < 0.1:  # Reduzido de 0.15 para 0.1
                     continue
                     
-                padding = 5
+                padding = 10  # Aumentado de 5 para 10
                 x1_pad = max(0, x1 - padding)
                 y1_pad = max(0, y1 - padding)
                 x2_pad = min(width, x2 + padding)
@@ -211,14 +211,23 @@ class VehicleDetector:
                 plate_region = frame[y1_pad:y2_pad, x1_pad:x2_pad]
                 
                 if plate_region.size > 0:
+                    # Melhorado o pré-processamento para OCR
                     plate_gray = cv2.cvtColor(plate_region, cv2.COLOR_BGR2GRAY)
-                    plate_gray = cv2.GaussianBlur(plate_gray, (3, 3), 0)
+                    plate_gray = cv2.GaussianBlur(plate_gray, (5, 5), 0)  # Aumentado kernel de 3x3 para 5x5
                     plate_gray = cv2.adaptiveThreshold(plate_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                                     cv2.THRESH_BINARY, 11, 2)
+                                                     cv2.THRESH_BINARY, 15, 2)  # Ajustado parâmetros
                     
+                    # Tenta OCR com diferentes pré-processamentos
                     ocr_results = self.reader.readtext(plate_region)
                     if not ocr_results:
+                        # Tenta com a imagem em escala de cinza
                         ocr_results = self.reader.readtext(plate_gray)
+                        if not ocr_results:
+                            # Tenta com a imagem redimensionada
+                            scale_factor = 2.0
+                            resized = cv2.resize(plate_region, None, fx=scale_factor, fy=scale_factor, 
+                                               interpolation=cv2.INTER_CUBIC)
+                            ocr_results = self.reader.readtext(resized)
                     
                     if ocr_results:
                         text = ocr_results[0][1]
